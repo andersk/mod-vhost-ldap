@@ -494,6 +494,11 @@ static int mod_vhost_ldap_translate_name(request_rec *r)
     int sleep;
     struct berval hostnamebv, shostnamebv;
 
+    // mod_vhost_ldap is disabled or we don't have LDAP Url
+    if ((conf->enabled != MVL_ENABLED)||(!conf->have_ldap_url)) {
+	return DECLINED;
+    }
+
     if ((error = ap_init_virtual_host(r->pool, "", r->server, &server)) != NULL) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, r,
 		      "[mod_vhost_ldap.c]: Could not initialize a new VirtualHost: %s",
@@ -506,11 +511,6 @@ static int mod_vhost_ldap_translate_name(request_rec *r)
     memset(reqc, 0, sizeof(mod_vhost_ldap_request_t)); 
 
     ap_set_module_config(r->request_config, &vhost_ldap_module, reqc);
-
-    // mod_vhost_ldap is disabled or we don't have LDAP Url
-    if ((conf->enabled != MVL_ENABLED)||(!conf->have_ldap_url)) {
-	return DECLINED;
-    }
 
 start_over:
 
