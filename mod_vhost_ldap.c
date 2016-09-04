@@ -475,6 +475,7 @@ command_rec mod_vhost_ldap_cmds[] = {
 #define FILTER_LENGTH MAX_STRING_LEN
 static int mod_vhost_ldap_translate_name(request_rec *r)
 {
+    apr_pool_t *pool = r->pool;
     server_rec *server;
     const char *error;
     int code;
@@ -499,7 +500,7 @@ static int mod_vhost_ldap_translate_name(request_rec *r)
 	return DECLINED;
     }
 
-    if ((error = ap_init_virtual_host(r->pool, "", r->server, &server)) != NULL) {
+    if ((error = ap_init_virtual_host(pool, "", r->server, &server)) != NULL) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, r,
 		      "[mod_vhost_ldap.c]: Could not initialize a new VirtualHost: %s",
 		      error);
@@ -507,7 +508,7 @@ static int mod_vhost_ldap_translate_name(request_rec *r)
     }
 
     reqc =
-	(mod_vhost_ldap_request_t *)apr_pcalloc(r->pool, sizeof(mod_vhost_ldap_request_t));
+	(mod_vhost_ldap_request_t *)apr_pcalloc(pool, sizeof(mod_vhost_ldap_request_t));
     memset(reqc, 0, sizeof(mod_vhost_ldap_request_t)); 
 
     ap_set_module_config(r->request_config, &vhost_ldap_module, reqc);
@@ -570,7 +571,7 @@ fallback:
 	    if (strncmp(hostname, "*.", 2) == 0)
 		hostname += 2;
 	    hostname += strcspn(hostname, ".");
-	    hostname = apr_pstrcat(r->pool, "*", hostname, (const char *)NULL);
+	    hostname = apr_pstrcat(pool, "*", hostname, (const char *)NULL);
 	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE|APLOG_NOERRNO, 0, r,
 		          "[mod_vhost_ldap.c] translate: "
 			  "virtual host not found, trying wildcard %s",
@@ -606,14 +607,14 @@ null:
     }
 
     /* mark the user and DN */
-    reqc->dn = apr_pstrdup(r->pool, dn);
+    reqc->dn = apr_pstrdup(pool, dn);
 
     /* Optimize */
     if (vals) {
 	int i;
 	for (i = 0; attributes[i]; i++) {
 
-	    char *val = apr_pstrdup (r->pool, vals[i]);
+	    char *val = apr_pstrdup (pool, vals[i]);
 	    /* These do not correspond to any real directives */
 	    if (strcasecmp (attributes[i], "uidNumber") == 0) {
 		reqc->uid = val;
@@ -662,17 +663,17 @@ null:
     }
 
     if ((code = reconfigure_directive(
-             r->pool, server, "ServerName",
-             apr_pstrcat(r->pool, "'", escape(r->pool, reqc->name), "'", (const char *)NULL))) != 0)
+             pool, server, "ServerName",
+             apr_pstrcat(pool, "'", escape(pool, reqc->name), "'", (const char *)NULL))) != 0)
 	return code;
 
     char *docroot =
 	strcmp(reqc->directory, ".") == 0 ?
-	apr_pstrcat(r->pool, reqc->home, "/web_scripts", (const char *)NULL) :
-	apr_pstrcat(r->pool, reqc->home, "/web_scripts/", reqc->directory, (const char *)NULL);
+	apr_pstrcat(pool, reqc->home, "/web_scripts", (const char *)NULL) :
+	apr_pstrcat(pool, reqc->home, "/web_scripts/", reqc->directory, (const char *)NULL);
     if ((code = reconfigure_directive(
-             r->pool, server, "DocumentRoot",
-             apr_pstrcat(r->pool, "'", escape(r->pool, docroot), "'", (const char *)NULL))) != 0)
+             pool, server, "DocumentRoot",
+             apr_pstrcat(pool, "'", escape(pool, docroot), "'", (const char *)NULL))) != 0)
 	return code;
 
     if (reqc->uid != NULL) {
@@ -681,27 +682,27 @@ null:
 	uid_t uid = (uid_t) atoll(reqc->uid);
 
 	if ((code = reconfigure_directive(
-                 r->pool, server, "UserDir",
-                 apr_pstrcat(r->pool, "'", escape(r->pool, USERDIR), "'", (const char *)NULL))) != 0)
+                 pool, server, "UserDir",
+                 apr_pstrcat(pool, "'", escape(pool, USERDIR), "'", (const char *)NULL))) != 0)
 	    return code;
 
         /* Deal with ~ expansion */
-        if ((code = reconfigure_directive(r->pool, server, "UserDir", "disabled")) != 0)
+        if ((code = reconfigure_directive(pool, server, "UserDir", "disabled")) != 0)
             return code;
 
-	if (apr_uid_name_get(&username, uid, r->pool) != APR_SUCCESS) {
+	if (apr_uid_name_get(&username, uid, pool) != APR_SUCCESS) {
 	    ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, r, 
 		          "could not get username for uid %d", uid);
 	    return HTTP_INTERNAL_SERVER_ERROR;
 	}
 
-        userdir_val = apr_pstrcat(r->pool, "enabled '", escape(r->pool, username), "'", (const char *)NULL);
+        userdir_val = apr_pstrcat(pool, "enabled '", escape(pool, username), "'", (const char *)NULL);
 
-	if ((code = reconfigure_directive(r->pool, server, "UserDir", userdir_val)) != 0)
+	if ((code = reconfigure_directive(pool, server, "UserDir", userdir_val)) != 0)
 	    return code;
     }
 
-    ap_fixup_virtual_host(r->pool, r->server, server);
+    ap_fixup_virtual_host(pool, r->server, server);
     r->server = server;
 
     /* Hack to allow post-processing by other modules (mod_rewrite, mod_alias) */
