@@ -92,11 +92,12 @@ typedef struct mod_vhost_ldap_request_t {
     char *home;				/* HOME */
     char *directory;			/* DocumentRoot relative to HOME/web_scripts */
     char *uid;				/* Suexec Uid */
+    char *username;			/* username */
     char *gid;				/* Suexec Gid */
 } mod_vhost_ldap_request_t;
 
 char *attributes[] =
-  { "scriptsVhostName", "homeDirectory", "scriptsVhostDirectory", "uidNumber", "gidNumber", 0 };
+  { "scriptsVhostName", "homeDirectory", "scriptsVhostDirectory", "uidNumber", "uid", "gidNumber", 0 };
 
 static int total_modules;
 
@@ -620,6 +621,10 @@ null:
 		reqc->uid = val;
 		continue;
 	    }
+	    else if (strcasecmp (attributes[i], "uid") == 0) {
+		reqc->username = val;
+		continue;
+	    }
 	    else if (strcasecmp (attributes[i], "gidNumber") == 0) {
 		reqc->gid = val;
 		continue;
@@ -652,8 +657,9 @@ null:
 		  "homeDirectory: %s, "
 		  "scriptsVhostDirectory: %s, "
 		  "uidNumber: %s, "
+		  "uid: %s, "
 		  "gidNumber: %s",
-		  reqc->name, reqc->home, reqc->directory, reqc->uid, reqc->gid);
+		  reqc->name, reqc->home, reqc->directory, reqc->uid, reqc->username, reqc->gid);
 
     if (reqc->name == NULL || reqc->home == NULL || reqc->directory == NULL) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, r, 
@@ -677,7 +683,6 @@ null:
 	return code;
 
     if (reqc->uid != NULL) {
-	char *username;
 	char *userdir_val;
 	uid_t uid = (uid_t) atoll(reqc->uid);
 
@@ -690,13 +695,13 @@ null:
         if ((code = reconfigure_directive(pool, server, "UserDir", "disabled")) != 0)
             return code;
 
-	if (apr_uid_name_get(&username, uid, pool) != APR_SUCCESS) {
+	if (reqc->username == NULL) {
 	    ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, r, 
 		          "could not get username for uid %d", uid);
 	    return HTTP_INTERNAL_SERVER_ERROR;
 	}
 
-        userdir_val = apr_pstrcat(pool, "enabled '", escape(pool, username), "'", (const char *)NULL);
+        userdir_val = apr_pstrcat(pool, "enabled '", escape(pool, reqc->username), "'", (const char *)NULL);
 
 	if ((code = reconfigure_directive(pool, server, "UserDir", userdir_val)) != 0)
 	    return code;
