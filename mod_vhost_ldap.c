@@ -29,6 +29,7 @@
 #include "http_core.h"
 #include "http_log.h"
 #include "http_request.h"
+#include "http_vhost.h"
 #include "apr_version.h"
 #include "apr_ldap.h"
 #include "apr_reslist.h"
@@ -464,9 +465,9 @@ command_rec mod_vhost_ldap_cmds[] = {
 };
 
 #define FILTER_LENGTH MAX_STRING_LEN
-static int mod_vhost_ldap_translate_name(request_rec *r)
+static int mod_vhost_ldap_lookup_vhost(conn_rec *conn, const char *host, server_rec **serverp)
 {
-    apr_pool_t *pool = r->pool;
+    apr_pool_t *pool = conn->pool;
     server_rec *server;
     const char *error;
     int code;
@@ -475,7 +476,7 @@ static int mod_vhost_ldap_translate_name(request_rec *r)
     const char **vals = NULL;
     char filtbuf[FILTER_LENGTH];
     mod_vhost_ldap_config_t *conf =
-	(mod_vhost_ldap_config_t *)ap_get_module_config(r->server->module_config, &vhost_ldap_module);
+	(mod_vhost_ldap_config_t *)ap_get_module_config((*serverp)->module_config, &vhost_ldap_module);
     util_ldap_connection_t *ldc = NULL;
     int result = 0;
     const char *dn = NULL;
@@ -491,8 +492,8 @@ static int mod_vhost_ldap_translate_name(request_rec *r)
 	return DECLINED;
     }
 
-    if ((error = ap_init_virtual_host(pool, "", r->server, &server)) != NULL) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, r,
+    if ((error = ap_init_virtual_host(pool, "", *serverp, &server)) != NULL) {
+        ap_log_cerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, conn,
 		      "[mod_vhost_ldap.c]: Could not initialize a new VirtualHost: %s",
 		      error);
 	return HTTP_INTERNAL_SERVER_ERROR;
@@ -502,30 +503,38 @@ static int mod_vhost_ldap_translate_name(request_rec *r)
 	(mod_vhost_ldap_request_t *)apr_pcalloc(pool, sizeof(mod_vhost_ldap_request_t));
     memset(reqc, 0, sizeof(mod_vhost_ldap_request_t)); 
 
-    ap_set_module_config(r->request_config, &vhost_ldap_module, reqc);
+    struct request_rec *dummy_r = apr_pcalloc(pool, sizeof(request_rec));
+    dummy_r->pool = pool;
+    dummy_r->connection = conn;
+    dummy_r->server = *serverp;
+    dummy_r->request_config = ap_create_request_config(pool);
+    dummy_r->per_dir_config = (*serverp)->lookup_defaults;
+    dummy_r->hostname = host;
+    dummy_r->request_time = apr_time_now();
+    dummy_r->log = &(*serverp)->log;
 
 start_over:
 
     if (conf->host) {
-        ldc = util_ldap_connection_find(r, conf->host, conf->port,
+        ldc = util_ldap_connection_find(dummy_r, conf->host, conf->port,
 					conf->binddn, conf->bindpw, conf->deref,
 					conf->secure);
     }
     else {
-        ap_log_rerror(APLOG_MARK, APLOG_WARNING|APLOG_NOERRNO, 0, r, 
+        ap_log_cerror(APLOG_MARK, APLOG_WARNING|APLOG_NOERRNO, 0, conn,
                       "[mod_vhost_ldap.c] translate: no conf->host - weird...?");
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    hostname = r->hostname;
+    hostname = host;
     if (hostname == NULL || hostname[0] == '\0')
         goto null;
 
 fallback:
 
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG|APLOG_NOERRNO, 0, r,
-		  "[mod_vhost_ldap.c]: translating hostname [%s], uri [%s]",
-		  hostname, r->uri);
+    ap_log_cerror(APLOG_MARK, APLOG_DEBUG|APLOG_NOERRNO, 0, conn,
+		  "[mod_vhost_ldap.c]: translating hostname [%s]",
+		  hostname);
 
     ber_str2bv(hostname, 0, 0, &hostnamebv);
     if (ldap_bv2escaped_filter_value(&hostnamebv, &shostnamebv) != 0)
@@ -533,7 +542,7 @@ fallback:
     apr_snprintf(filtbuf, FILTER_LENGTH, "(&(%s)(|(scriptsVhostName=%s)(scriptsVhostAlias=%s)))", conf->filter, shostnamebv.bv_val, shostnamebv.bv_val);
     ber_memfree(shostnamebv.bv_val);
 
-    result = util_ldap_cache_getuserdn(r, ldc, conf->url, conf->basedn, conf->scope,
+    result = util_ldap_cache_getuserdn(dummy_r, ldc, conf->url, conf->basedn, conf->scope,
 				       attributes, filtbuf, &dn, &vals);
 
     util_ldap_connection_close(ldc);
@@ -543,7 +552,7 @@ fallback:
 	(result == LDAP_TIMEOUT) ||
 	(result == LDAP_CONNECT_ERROR)) {
         sleep = sleep0 + sleep1;
-        ap_log_rerror(APLOG_MARK, APLOG_WARNING|APLOG_NOERRNO, 0, r,
+        ap_log_cerror(APLOG_MARK, APLOG_WARNING|APLOG_NOERRNO, 0, conn,
 		      "[mod_vhost_ldap.c]: lookup failure, retry number #[%d], sleeping for [%d] seconds",
 		      failures, sleep);
         if (failures++ < MAX_FAILURES) {
@@ -563,7 +572,7 @@ fallback:
 		hostname += 2;
 	    hostname += strcspn(hostname, ".");
 	    hostname = apr_pstrcat(pool, "*", hostname, (const char *)NULL);
-	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE|APLOG_NOERRNO, 0, r,
+	    ap_log_cerror(APLOG_MARK, APLOG_NOTICE|APLOG_NOERRNO, 0, conn,
 		          "[mod_vhost_ldap.c] translate: "
 			  "virtual host not found, trying wildcard %s",
 			  hostname);
@@ -572,7 +581,7 @@ fallback:
 
 null:
 	if (conf->fallback && (is_fallback++ <= 0)) {
-	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE|APLOG_NOERRNO, 0, r,
+	    ap_log_cerror(APLOG_MARK, APLOG_NOTICE|APLOG_NOERRNO, 0, conn,
 			  "[mod_vhost_ldap.c] translate: "
 			  "virtual host %s not found, trying fallback %s",
 			  hostname, conf->fallback);
@@ -580,7 +589,7 @@ null:
 	    goto fallback;
 	}
 
-	ap_log_rerror(APLOG_MARK, APLOG_WARNING|APLOG_NOERRNO, 0, r,
+	ap_log_cerror(APLOG_MARK, APLOG_WARNING|APLOG_NOERRNO, 0, conn,
 		      "[mod_vhost_ldap.c] translate: "
 		      "virtual host %s not found",
 		      hostname);
@@ -590,10 +599,10 @@ null:
 
     /* handle bind failure */
     if (result != LDAP_SUCCESS) {
-        ap_log_rerror(APLOG_MARK, APLOG_WARNING|APLOG_NOERRNO, 0, r, 
+        ap_log_cerror(APLOG_MARK, APLOG_WARNING|APLOG_NOERRNO, 0, conn,
                       "[mod_vhost_ldap.c] translate: "
-                      "translate failed; virtual host %s; URI %s [%s]",
-		      hostname, r->uri, ldap_err2string(result));
+                      "translate failed; virtual host %s [%s]",
+		      hostname, ldap_err2string(result));
 	return HTTP_INTERNAL_SERVER_ERROR;
     }
 
@@ -634,14 +643,14 @@ null:
 	    else {
 		/* This should not actually be reachable, but it's
 		   good to cover all all possible cases */
-                ap_log_rerror(APLOG_MARK, APLOG_DEBUG|APLOG_NOERRNO, 0, r,
+                ap_log_cerror(APLOG_MARK, APLOG_DEBUG|APLOG_NOERRNO, 0, conn,
                               "Unexpected attribute %s encountered", attributes[i]);
                 continue;
             }
 	}
     }
 
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG|APLOG_NOERRNO, 0, r,
+    ap_log_cerror(APLOG_MARK, APLOG_DEBUG|APLOG_NOERRNO, 0, conn,
 		  "[mod_vhost_ldap.c]: loaded from ldap: "
 		  "scriptsVhostName: %s, "
 		  "homeDirectory: %s, "
@@ -652,7 +661,7 @@ null:
 		  reqc->name, reqc->home, reqc->directory, reqc->uid, reqc->username, reqc->gid);
 
     if (reqc->name == NULL || reqc->home == NULL || reqc->directory == NULL) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, r, 
+        ap_log_cerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, conn,
                       "[mod_vhost_ldap.c] translate: "
                       "translate failed; ServerName or DocumentRoot not defined");
 	return HTTP_INTERNAL_SERVER_ERROR;
@@ -676,7 +685,7 @@ null:
 	char *userdir_val;
 
         if (reqc->gid == NULL) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, r,
+            ap_log_cerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, conn,
                           "could not get gid for uid %s", reqc->uid);
             return HTTP_INTERNAL_SERVER_ERROR;
         }
@@ -698,7 +707,7 @@ null:
             return code;
 
 	if (reqc->username == NULL) {
-	    ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, r, 
+	    ap_log_cerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, conn,
 		          "could not get username for uid %s", reqc->uid);
 	    return HTTP_INTERNAL_SERVER_ERROR;
 	}
@@ -709,24 +718,20 @@ null:
 	    return code;
     }
 
-    ap_fixup_virtual_host(pool, r->server, server);
-    r->server = server;
+    if ((code = reconfigure_directive(pool, server, "VhostLDAPEnabled", "off")) != 0)
+        return code;
 
-    /* Hack to allow post-processing by other modules (mod_rewrite, mod_alias) */
-    return DECLINED;
+    ap_fixup_virtual_host(pool, *serverp, server);
+    *serverp = server;
+
+    return OK;
 }
 
 static void
 mod_vhost_ldap_register_hooks (apr_pool_t * p)
 {
-
-    /*
-     * Run before mod_rewrite
-     */
-    static const char * const aszRewrite[]={ "mod_rewrite.c", NULL };
-
     ap_hook_post_config(mod_vhost_ldap_post_config, NULL, NULL, APR_HOOK_MIDDLE);
-    ap_hook_translate_name(mod_vhost_ldap_translate_name, NULL, aszRewrite, APR_HOOK_FIRST);
+    ap_hook_lookup_vhost(mod_vhost_ldap_lookup_vhost, NULL, NULL, APR_HOOK_MIDDLE);
 #if (APR_MAJOR_VERSION >= 1)
     ap_hook_optional_fn_retrieve(ImportULDAPOptFn,NULL,NULL,APR_HOOK_MIDDLE);
 #endif
