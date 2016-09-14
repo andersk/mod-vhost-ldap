@@ -41,16 +41,6 @@
 #error mod_vhost_ldap requires APR-util to have LDAP support built in
 #endif
 
-#if !defined(WIN32) && !defined(OS2) && !defined(BEOS) && !defined(NETWARE)
-#define HAVE_UNIX_SUEXEC
-#endif
-
-#ifdef HAVE_UNIX_SUEXEC
-#include "unixd.h"              /* Contains the suexec_identity hook used on Unix */
-#endif
-
-#define MIN_UID 100
-#define MIN_GID 100
 const char USERDIR[] = "web_scripts";
 
 #define MAX_FAILURES 5
@@ -684,7 +674,19 @@ null:
 
     if (reqc->uid != NULL) {
 	char *userdir_val;
-	uid_t uid = (uid_t) atoll(reqc->uid);
+
+        if (reqc->gid == NULL) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, r,
+                          "could not get gid for uid %s", reqc->uid);
+            return HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        if ((code = reconfigure_directive(
+                 pool, server, "SuexecUserGroup",
+                 apr_pstrcat(
+                     pool, "'#", escape(pool, reqc->uid), "' '#",
+                     escape(pool, reqc->gid), "'", (const char *)NULL))) != 0)
+            return code;
 
 	if ((code = reconfigure_directive(
                  pool, server, "UserDir",
@@ -697,7 +699,7 @@ null:
 
 	if (reqc->username == NULL) {
 	    ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, 0, r, 
-		          "could not get username for uid %d", uid);
+		          "could not get username for uid %s", reqc->uid);
 	    return HTTP_INTERNAL_SERVER_ERROR;
 	}
 
@@ -714,48 +716,6 @@ null:
     return DECLINED;
 }
 
-#ifdef HAVE_UNIX_SUEXEC
-static ap_unix_identity_t *mod_vhost_ldap_get_suexec_id_doer(const request_rec * r)
-{
-  ap_unix_identity_t *ugid = NULL;
-  mod_vhost_ldap_config_t *conf = 
-      (mod_vhost_ldap_config_t *)ap_get_module_config(r->server->module_config,
-						      &vhost_ldap_module);
-  mod_vhost_ldap_request_t *req =
-      (mod_vhost_ldap_request_t *)ap_get_module_config(r->request_config,
-						       &vhost_ldap_module);
-
-  uid_t uid = -1;
-  gid_t gid = -1;
-
-  // mod_vhost_ldap is disabled or we don't have LDAP Url
-  if ((conf->enabled != MVL_ENABLED)||(!conf->have_ldap_url)) {
-      return NULL;
-  }
-
-  if ((req == NULL)||(req->uid == NULL)||(req->gid == NULL)) {
-      return NULL;
-  }
-
-  if ((ugid = apr_palloc(r->pool, sizeof(ap_unix_identity_t))) == NULL) {
-      return NULL;
-  }
-
-  uid = (uid_t)atoll(req->uid);
-  gid = (gid_t)atoll(req->gid);
-
-  if ((uid < MIN_UID)||(gid < MIN_GID)) {
-      return NULL;
-  }
-
-  ugid->uid = uid;
-  ugid->gid = gid;
-  ugid->userdir = 0;
-  
-  return ugid;
-}
-#endif
-
 static void
 mod_vhost_ldap_register_hooks (apr_pool_t * p)
 {
@@ -767,9 +727,6 @@ mod_vhost_ldap_register_hooks (apr_pool_t * p)
 
     ap_hook_post_config(mod_vhost_ldap_post_config, NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_translate_name(mod_vhost_ldap_translate_name, NULL, aszRewrite, APR_HOOK_FIRST);
-#ifdef HAVE_UNIX_SUEXEC
-    ap_hook_get_suexec_identity(mod_vhost_ldap_get_suexec_id_doer, NULL, NULL, APR_HOOK_MIDDLE);
-#endif
 #if (APR_MAJOR_VERSION >= 1)
     ap_hook_optional_fn_retrieve(ImportULDAPOptFn,NULL,NULL,APR_HOOK_MIDDLE);
 #endif
